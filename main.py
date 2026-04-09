@@ -590,9 +590,20 @@ class SpotifySkipperApp(QWidget):
         if act in profs: self.gesture_profile_combo.setCurrentText(act)
         self.gesture_profile_combo.blockSignals(False)
 
-    def on_gesture_profile_changed(self, text):
+    def on_gesture_profile_changed(self, index):
+        text = self.gesture_profile_combo.currentText()
+        if not text: return
         self.gestures_mgr.db["active_profile"] = text
         self.gestures_mgr.save()
+        
+        # Kullanıcıya güven vermek için profilin anında kaydedildiğini göster
+        if hasattr(self, 'tray_icon') and self.isVisible():
+            self.tray_icon.showMessage(
+                "Profil Seçildi ve Kaydedildi", 
+                f"Aktif profil anında '{text}' olarak ayarlandı.", 
+                QSystemTrayIcon.Information, 
+                1500
+            )
 
     def on_trigger_changed(self, index):
         keys = ["ctrl_l", "ctrl_r", "alt_l", "shift_l"]
@@ -709,7 +720,8 @@ class SpotifySkipperApp(QWidget):
             return
             
         # AKILLI ŞABLON KARŞILAŞTIRMA MANTIĞI
-        best_template, score = recognizer.recognize(self.draw_history, templates, threshold=150.0)
+        # Threshold devasa bir sayı yapılarak "tıpatıp aynısı" yerine "en çok benzeyeni" seçmesi sağlandı.
+        best_template, score = recognizer.recognize(self.draw_history, templates, threshold=5000.0)
         
         if best_template:
             action = best_template["action"]
