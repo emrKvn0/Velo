@@ -16,3 +16,7 @@ __pycache__/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# User Settings and Custom Gestures
+settings.json
+gestures.json
