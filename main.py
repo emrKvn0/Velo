@@ -19,7 +19,7 @@ except Exception:
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QCheckBox, QPushButton, QSystemTrayIcon, 
                                QMenu, QStyle, QComboBox, QDialog, QColorDialog,
-                               QMessageBox, QInputDialog)
+                               QMessageBox, QInputDialog, QListWidget)
 from PySide6.QtGui import QIcon, QAction, QPainter, QPen, QColor, QFont, QCursor, QPalette
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QPoint
 
@@ -29,18 +29,6 @@ import recognizer
 keyboard_controller = keyboard.Controller()
 
 user32 = ctypes.windll.user32
-SCREEN_LEFT = user32.GetSystemMetrics(76)
-SCREEN_TOP = user32.GetSystemMetrics(77)
-SCREEN_WIDTH = user32.GetSystemMetrics(78)
-SCREEN_HEIGHT = user32.GetSystemMetrics(79)
-SCREEN_RIGHT = SCREEN_LEFT + SCREEN_WIDTH - 1
-
-TIME_WINDOW = 0.4
-EDGE_TOLERANCE = 5
-MIN_DX = 250
-MIN_DY = 80
-MAX_Y_LIMIT = SCREEN_TOP + (SCREEN_HEIGHT * 0.6)
-COOLDOWN = 1.0
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
 GESTURES_FILE = os.path.join(os.path.dirname(__file__), "gestures.json")
@@ -77,8 +65,19 @@ class GestureSignals(QObject):
 class DrawingCanvas(QWidget):
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(400, 300)
-        self.setStyleSheet("background-color: #1a1a1a; border: 2px solid #333; border-radius: 10px;")
+        # EKRAN ORA(ASPECT RATIO) HESAPLAMA
+        # Gerçek bilgisayar ekranı ile aynı oranlara sahip bir tuval tasarlıyoruz
+        sw = user32.GetSystemMetrics(0)
+        sh = user32.GetSystemMetrics(1)
+        if sw == 0: sw = 1920
+        if sh == 0: sh = 1080
+        
+        target_w = 480
+        target_h = int(target_w * (sh / sw))
+        
+        self.setFixedSize(target_w, target_h)
+        self.setStyleSheet("background-color: #1a1a1a; border: 4px solid #444; border-radius: 8px;")
+        
         self.points = []
         self.is_drawing = False
         self.setCursor(Qt.CrossCursor)
@@ -86,13 +85,16 @@ class DrawingCanvas(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        
         painter.fillRect(self.rect(), QColor(26, 26, 26))
+        
+        # Ekranı Taklit Eden Mini Border / İpucu
+        painter.setPen(QPen(QColor(50, 50, 50), 2))
+        painter.drawRect(2, 2, self.width()-4, self.height()-4)
         
         if not self.points:
             painter.setPen(QColor(100, 100, 100))
-            painter.setFont(QFont("Segoe UI", 16))
-            painter.drawText(self.rect(), Qt.AlignCenter, "Buraya Basılı Tutarak Şekli Çizin")
+            painter.setFont(QFont("Segoe UI", 12))
+            painter.drawText(self.rect(), Qt.AlignCenter, "Monitörünüzün küçültülmüş hali.\nBuraya Basılı Tutarak Şekli Çizin")
             
         if len(self.points) >= 2:
             pen = QPen(QColor(29, 185, 84))
@@ -131,7 +133,7 @@ class GestureRecorderWindow(QDialog):
         super().__init__(parent)
         self.gestures_mgr = db_mgr
         self.setWindowTitle("🎨 Özel Çizim Kaydedici / Eğitim Modu")
-        self.resize(750, 500)
+        self.resize(800, 500)
         
         layout = QHBoxLayout()
         
@@ -142,50 +144,58 @@ class GestureRecorderWindow(QDialog):
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #1DB954;")
         left_panel.addWidget(title)
         
-        info = QLabel("<b>Adım 1:</b> Sağdaki tuvale farenizle<br>bir şekil çizin (Örn: Z, V, O).<br>Tek hamlede çizip bırakın.")
-        info.setStyleSheet("font-size: 13px;")
-        left_panel.addWidget(info)
+        left_panel.addWidget(QLabel("<b>Profil ve Eylem Seç:</b>"))
+        prof_layout = QHBoxLayout()
+        self.profile_combo = QComboBox()
+        self.profile_combo.currentIndexChanged.connect(self.load_gesture_list)
+        prof_layout.addWidget(self.profile_combo)
         
-        left_panel.addWidget(QLabel("<b>Adım 2:</b> Bu şekil ne yapsın?"))
+        new_prof_btn = QPushButton("+")
+        new_prof_btn.setFixedWidth(30)
+        new_prof_btn.clicked.connect(self.new_profile)
+        prof_layout.addWidget(new_prof_btn)
+        left_panel.addLayout(prof_layout)
+        
         self.action_combo = QComboBox()
-        self.action_combo.addItems([
-            "Sonraki Şarkı",
-            "Önceki Şarkı",
-            "Oynat / Duraklat",
-            "Sesi Kapat / Aç"
-        ])
+        self.action_combo.addItems(["Sonraki Şarkı", "Önceki Şarkı", "Oynat / Duraklat", "Sesi Kapat / Aç"])
         left_panel.addWidget(self.action_combo)
         
-        left_panel.addWidget(QLabel("<b>Adım 3:</b> Hangi profile kaydedilsin?"))
-        self.profile_combo = QComboBox()
-        left_panel.addWidget(self.profile_combo)
-        
-        new_prof_btn = QPushButton("Yeni Profil Oluştur")
-        new_prof_btn.clicked.connect(self.new_profile)
-        left_panel.addWidget(new_prof_btn)
-        
-        left_panel.addStretch()
-        
-        clear_btn = QPushButton("Temizle (Yeniden Çiz)")
-        clear_btn.clicked.connect(self.clear_canvas)
-        left_panel.addWidget(clear_btn)
-        
-        save_btn = QPushButton("💾 Şekli ve Profili Kaydet")
-        save_btn.setStyleSheet("background-color: #1DB954; color: black; font-weight: bold; padding: 12px; font-size: 14px; border-radius: 5px;")
+        save_btn = QPushButton("💾 Şekli Öğret (Kaydet)")
+        save_btn.setStyleSheet("background-color: #1DB954; color: black; font-weight: bold; padding: 10px;")
         save_btn.clicked.connect(self.save_gesture)
         save_btn.setCursor(Qt.PointingHandCursor)
         left_panel.addWidget(save_btn)
         
+        left_panel.addWidget(QLabel("<b>Daha Önce Çizilen Şekiller:</b>"))
+        self.gesture_list = QListWidget()
+        self.gesture_list.itemClicked.connect(self.on_gesture_selected)
+        left_panel.addWidget(self.gesture_list)
+        
+        del_btn = QPushButton("Seçili Şekli Sil")
+        del_btn.setStyleSheet("background-color: #aa3333; color: white;")
+        del_btn.clicked.connect(self.delete_gesture)
+        left_panel.addWidget(del_btn)
+        
         self.update_profiles()
         
+        right_panel = QVBoxLayout()
+        right_panel.setAlignment(Qt.AlignCenter)
         self.canvas = DrawingCanvas()
         
+        clear_btn = QPushButton("Tuvali Temizle")
+        clear_btn.clicked.connect(self.clear_canvas)
+        clear_btn.setFixedWidth(self.canvas.width())
+        
+        right_panel.addWidget(self.canvas)
+        right_panel.addWidget(clear_btn)
+        
         layout.addLayout(left_panel, 1)
-        layout.addWidget(self.canvas, 2)
+        layout.addLayout(right_panel, 2)
         
         self.setLayout(layout)
         
     def update_profiles(self):
+        self.profile_combo.blockSignals(True)
         self.profile_combo.clear()
         profs = list(self.gestures_mgr.db.get("profiles", {}).keys())
         if not profs:
@@ -195,6 +205,8 @@ class GestureRecorderWindow(QDialog):
         act = self.gestures_mgr.db.get("active_profile")
         if act in profs:
             self.profile_combo.setCurrentText(act)
+        self.profile_combo.blockSignals(False)
+        self.load_gesture_list()
             
     def new_profile(self):
         text, ok = QInputDialog.getText(self, "Yeni Profil", "Profil adı giriniz:")
@@ -204,6 +216,36 @@ class GestureRecorderWindow(QDialog):
                 self.gestures_mgr.db["profiles"][prof_name] = {}
             self.update_profiles()
             self.profile_combo.setCurrentText(prof_name)
+            
+    def load_gesture_list(self):
+        self.gesture_list.clear()
+        profile = self.profile_combo.currentText()
+        gestures = self.gestures_mgr.db.get("profiles", {}).get(profile, {})
+        for gid, g_data in gestures.items():
+            name = g_data.get("name", "Bilinmeyen eylem")
+            self.gesture_list.addItem(name)
+            self.gesture_list.item(self.gesture_list.count()-1).setData(Qt.UserRole, gid)
+            
+    def on_gesture_selected(self, item):
+        gid = item.data(Qt.UserRole)
+        profile = self.profile_combo.currentText()
+        gestures = self.gestures_mgr.db.get("profiles", {}).get(profile, {})
+        if gid in gestures:
+            raw = gestures[gid].get("raw_points", [])
+            self.canvas.points = [(p[0], p[1]) for p in raw] if raw else []
+            self.canvas.update()
+            
+    def delete_gesture(self):
+        item = self.gesture_list.currentItem()
+        if not item: return
+        gid = item.data(Qt.UserRole)
+        profile = self.profile_combo.currentText()
+        if gid in self.gestures_mgr.db["profiles"][profile]:
+            del self.gestures_mgr.db["profiles"][profile][gid]
+            self.gestures_mgr.save()
+            self.load_gesture_list()
+            self.canvas.clear()
+            if self.parent(): self.parent().update_gesture_profiles_ui()
             
     def clear_canvas(self):
         self.canvas.clear()
@@ -217,7 +259,6 @@ class GestureRecorderWindow(QDialog):
         action_map = ["media_next", "media_previous", "media_play_pause", "media_volume_mute"]
         action_name = self.action_combo.currentText()
         action_key = action_map[action_idx]
-        
         profile = self.profile_combo.currentText()
         
         norm_pts = recognizer.normalize(self.canvas.points)
@@ -226,16 +267,16 @@ class GestureRecorderWindow(QDialog):
         self.gestures_mgr.db["profiles"][profile][gid] = {
             "name": action_name,
             "action": action_key,
-            "points": norm_pts
+            "points": norm_pts,
+            "raw_points": self.canvas.points
         }
         self.gestures_mgr.save()
         
         if self.parent():
             self.parent().update_gesture_profiles_ui()
             
-        QMessageBox.information(self, "Başarılı", f"Özel çiziminiz (Gesture) '{profile}' adlı profile '{action_name}' göreviyle eklendi!\nArtık belirlediğiniz tuşa basılı tutup bu şekli çizdiğinizde görev tetiklenecek.")
-        self.canvas.clear()
-        self.accept()
+        self.load_gesture_list()
+        QMessageBox.information(self, "Başarılı", f"Özel çiziminiz (Gesture) '{profile}' profiline eklendi!")
 
 
 class CustomThemeModal(QDialog):
@@ -418,8 +459,6 @@ class SpotifySkipperApp(QWidget):
         self.signals.finish_gesture.connect(self.overlay.finish_gesture)
         self.signals.clear_path.connect(self.overlay.clear_path)
         
-        self.history = collections.deque()
-        self.last_trigger_time = 0
         self.is_key_pressed = False
         
         self.drawing_started = False
@@ -447,10 +486,10 @@ class SpotifySkipperApp(QWidget):
                 json.dump(self.settings, f, indent=4)
             self.gestures_mgr.save()
             if not silent:
-                QMessageBox.information(self, "Başarılı", "✅ Tüm ayarlarınız ve profilleriniz kaydedildi!")
+                QMessageBox.information(self, "Başarılı", "✅ Tüm ayarlarınız kaydedildi!")
         except Exception as e:
             if not silent:
-                QMessageBox.warning(self, "Hata", f"Kaydedilirken bir sorun oluştu: {e}")
+                QMessageBox.warning(self, "Hata", f"Kaydedilirken hata oluştu: {e}")
 
     def get_trigger_key(self):
         k = self.settings.get("trigger_key", "ctrl_l")
@@ -460,7 +499,7 @@ class SpotifySkipperApp(QWidget):
         return keyboard.Key.ctrl_l
 
     def init_ui(self):
-        self.setWindowTitle("Spotify Skipper V3 - Özel Şekiller")
+        self.setWindowTitle("Spotify Skipper V3 - Tam Kontrol")
         self.resize(520, 500)
         
         layout = QVBoxLayout()
@@ -472,7 +511,7 @@ class SpotifySkipperApp(QWidget):
         self.title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title_label)
         
-        gesture_btn = QPushButton("🎨 Çizim Modu / Özel Şekil Öğret")
+        gesture_btn = QPushButton("🎨 Özel Şekiller (Gestures) Oluştur")
         gesture_btn.setCursor(Qt.PointingHandCursor)
         gesture_btn.setStyleSheet("""
             QPushButton {
@@ -500,7 +539,6 @@ class SpotifySkipperApp(QWidget):
         trigger_layout.addWidget(QLabel("<b>Tetikleyici Tuş (Kısayol):</b>"))
         self.trigger_combo = QComboBox()
         self.trigger_combo.addItems(["Sol CTRL", "Sağ CTRL", "Sol ALT", "Sol SHIFT"])
-        
         tm = {"ctrl_l": 0, "ctrl_r": 1, "alt_l": 2, "shift_l": 3}
         self.trigger_combo.setCurrentIndex(tm.get(self.settings.get("trigger_key", "ctrl_l"), 0))
         self.trigger_combo.currentIndexChanged.connect(self.on_trigger_changed)
@@ -523,11 +561,6 @@ class SpotifySkipperApp(QWidget):
         layout.addLayout(theme_layout)
         
         layout.addWidget(QLabel("<b>Diğer Ayarlar:</b>"))
-        self.ctrl_checkbox = QCheckBox("Akıllı Çizim Modunu Aktifleştir")
-        self.ctrl_checkbox.setChecked(self.settings.get("ctrl_lock", True))
-        self.ctrl_checkbox.toggled.connect(self.on_ctrl_toggled)
-        layout.addWidget(self.ctrl_checkbox)
-        
         self.startup_checkbox = QCheckBox("Windows ile birlikte başlat")
         self.startup_checkbox.setChecked(self.settings.get("run_on_startup", False))
         self.startup_checkbox.toggled.connect(self.on_startup_toggled)
@@ -554,8 +587,7 @@ class SpotifySkipperApp(QWidget):
         if not profs: profs = ["Varsayılan Profil"]
         self.gesture_profile_combo.addItems(profs)
         act = self.gestures_mgr.db.get("active_profile")
-        if act in profs:
-            self.gesture_profile_combo.setCurrentText(act)
+        if act in profs: self.gesture_profile_combo.setCurrentText(act)
         self.gesture_profile_combo.blockSignals(False)
 
     def on_gesture_profile_changed(self, text):
@@ -609,10 +641,6 @@ class SpotifySkipperApp(QWidget):
         event.ignore()
         self.hide()
         self.tray_icon.showMessage("Spotify Skipper V3", "Uygulama arka planda dinliyor.", QSystemTrayIcon.Information, 2000)
-
-    def on_ctrl_toggled(self, checked):
-        self.settings["ctrl_lock"] = checked
-        self.save_settings(silent=True)
         
     def on_startup_toggled(self, checked):
         self.settings["run_on_startup"] = checked
@@ -665,9 +693,6 @@ class SpotifySkipperApp(QWidget):
             self.signals.clear_path.emit()
             return
             
-        start_x, start_y = self.draw_history[0]
-        end_x, end_y = self.draw_history[-1]
-        
         total_dist = 0
         for i in range(1, len(self.draw_history)):
             total_dist += math.hypot(self.draw_history[i][0] - self.draw_history[i-1][0], 
@@ -679,24 +704,8 @@ class SpotifySkipperApp(QWidget):
 
         templates = self.gestures_mgr.get_active_templates()
         if not templates:
-            # FALLBACK KLASİK MANTIK (Eğer hiç şablon öğretilmediyse)
-            angle = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
-            if -45 < angle <= 45:
-                keyboard_controller.press(keyboard.Key.media_next)
-                keyboard_controller.release(keyboard.Key.media_next)
-                self.signals.finish_gesture.emit("Sonraki Şarkı 👉")
-            elif angle > 135 or angle <= -135:
-                keyboard_controller.press(keyboard.Key.media_previous)
-                keyboard_controller.release(keyboard.Key.media_previous)
-                self.signals.finish_gesture.emit("👈 Önceki Şarkı")
-            elif 45 < angle <= 135:
-                keyboard_controller.press(keyboard.Key.media_play_pause)
-                keyboard_controller.release(keyboard.Key.media_play_pause)
-                self.signals.finish_gesture.emit("⏯ Oynat / Duraklat")
-            elif -135 < angle <= -45:
-                keyboard_controller.press(keyboard.Key.media_volume_mute)
-                keyboard_controller.release(keyboard.Key.media_volume_mute)
-                self.signals.finish_gesture.emit("🔇 Sesi Sustur/Aç")
+            # ARTIK FALLBACK ESKİ KOD YOK, YALNIZCA ÖĞRETİLENLER...
+            self.signals.finish_gesture.emit("Lütfen bir şekil öğretin ❌")
             return
             
         # AKILLI ŞABLON KARŞILAŞTIRMA MANTIĞI
@@ -717,48 +726,21 @@ class SpotifySkipperApp(QWidget):
             self.signals.finish_gesture.emit("Bilinmeyen Şekil ❓")
 
     def on_move(self, x, y):
-        # YENİ MOD: Ekranda Akıllı Çizim
-        if self.settings.get("ctrl_lock", True):
-            if self.is_key_pressed:
-                if not self.drawing_started:
-                    if self.draw_start_x is None:
-                        self.draw_start_x = x
-                        self.draw_start_y = y
-                    dist = math.hypot(x - self.draw_start_x, y - self.draw_start_y)
-                    if dist > 20: 
-                        self.drawing_started = True
-                        self.draw_history.append((self.draw_start_x, self.draw_start_y))
-                        self.signals.add_point.emit()
-                
-                if self.drawing_started:
-                    self.draw_history.append((x, y))
+        # Yalnızca Yeni Şekil Çizim Motoru var. Eski Edge Swap kodu tamamen silindi.
+        if self.is_key_pressed:
+            if not self.drawing_started:
+                if self.draw_start_x is None:
+                    self.draw_start_x = x
+                    self.draw_start_y = y
+                dist = math.hypot(x - self.draw_start_x, y - self.draw_start_y)
+                if dist > 20: 
+                    self.drawing_started = True
+                    self.draw_history.append((self.draw_start_x, self.draw_start_y))
                     self.signals.add_point.emit()
-            return
             
-        # ESKİ MOD (Fallback)
-        current_time = time.time()
-        self.history.append((current_time, x, y))
-        while self.history and current_time - self.history[0][0] > TIME_WINDOW:
-            self.history.popleft()
-        if current_time - self.last_trigger_time > COOLDOWN:
-            at_left_edge = (x <= SCREEN_LEFT + EDGE_TOLERANCE)
-            if not at_left_edge and (x <= EDGE_TOLERANCE): at_left_edge = True
-            at_right_edge = (x >= SCREEN_RIGHT - EDGE_TOLERANCE)
-            if (at_left_edge or at_right_edge) and y < MAX_Y_LIMIT and len(self.history) >= 2:
-                start_t, start_x, start_y = self.history[0]
-                dx = x - start_x
-                dy = y - start_y
-                if dy > MIN_DY:  
-                    if at_left_edge and dx < -MIN_DX:
-                        keyboard_controller.press(keyboard.Key.media_previous)
-                        keyboard_controller.release(keyboard.Key.media_previous)
-                        self.last_trigger_time = current_time
-                        self.history.clear()
-                    elif at_right_edge and dx > MIN_DX:
-                        keyboard_controller.press(keyboard.Key.media_next)
-                        keyboard_controller.release(keyboard.Key.media_next)
-                        self.last_trigger_time = current_time
-                        self.history.clear()
+            if self.drawing_started:
+                self.draw_history.append((x, y))
+                self.signals.add_point.emit()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
