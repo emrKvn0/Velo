@@ -19,7 +19,7 @@ except Exception:
 from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QCheckBox, QPushButton, QSystemTrayIcon, 
                                QMenu, QStyle, QComboBox, QDialog, QColorDialog,
-                               QMessageBox, QInputDialog, QListWidget)
+                               QMessageBox, QInputDialog, QListWidget, QGroupBox, QFrame)
 from PySide6.QtGui import QIcon, QAction, QPainter, QPen, QColor, QFont, QCursor, QPalette
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QPoint
 
@@ -32,6 +32,7 @@ user32 = ctypes.windll.user32
 
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
 GESTURES_FILE = os.path.join(os.path.dirname(__file__), "gestures.json")
+PRESETS_FILE = os.path.join(os.path.dirname(__file__), "Hazir_Profiller", "Velo_Varsayilan_Gestures.json")
 
 class GlobalGestures:
     def __init__(self):
@@ -43,6 +44,31 @@ class GlobalGestures:
             try:
                 with open(GESTURES_FILE, "r", encoding="utf-8") as f:
                     self.db = json.load(f)
+            except Exception: pass
+            
+        # Hazır profilleri her zaman içeri aktar (Eğer sistemde yoksa)
+        if os.path.exists(PRESETS_FILE):
+            try:
+                with open(PRESETS_FILE, "r", encoding="utf-8") as f:
+                    presets = json.load(f)
+                
+                if "profiles" not in self.db:
+                    self.db["profiles"] = {}
+                    
+                has_changes = False
+                for p_name, p_gestures in presets.get("profiles", {}).items():
+                    if p_name not in self.db["profiles"] or len(self.db["profiles"].get(p_name, {})) == 0:
+                        self.db["profiles"][p_name] = p_gestures
+                        has_changes = True
+
+                if has_changes:
+                    # Eger kullanıcının aktif profili "Varsayılan Profil" ise ve ici bossa, yeni yüklenenlerden birini aktif yapalim
+                    act = self.db.get("active_profile", "")
+                    if act == "Varsayılan Profil" and len(self.db["profiles"].get("Varsayılan Profil", {})) == 0:
+                        # En son eklenen profili aktif yap (Mesela 'Edge Kavisli Gestures (Kenarlar)')
+                        self.db["active_profile"] = list(presets.get("profiles", {}).keys())[-1]
+                        
+                    self.save()
             except Exception: pass
             
     def save(self):
@@ -60,6 +86,7 @@ class GestureSignals(QObject):
     add_point = Signal()
     finish_gesture = Signal(str)
     clear_path = Signal()
+    immediate_clear = Signal()
 
 
 class DrawingCanvas(QWidget):
@@ -369,6 +396,13 @@ class OverlayWindow(QWidget):
     def clear_path(self):
         self.fade_timer.start(25)
         
+    def immediate_clear(self):
+        self.fade_timer.stop()
+        if self.path: self.path.clear()
+        self.fade_alpha = 0
+        self.text_alpha = 0
+        self.update()
+        
     def fade_step(self):
         needs_update = False
         if self.fade_alpha > 0:
@@ -434,6 +468,46 @@ class OverlayWindow(QWidget):
             y_pos = local_center_y + int(rect.height() / 4)
             painter.drawText(x_pos, y_pos, self.last_text)
 
+class ShortcutSettingsModal(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("⌨️ Klavye Kısayolları (Spotify Ses)")
+        self.resize(320, 200)
+        self.parent_app = parent
+        
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("<b>Tetikleyici tuşa (Örn Ctrl) basılı tutarken:</b>"))
+        
+        layout.addWidget(QLabel("Sesi Arttırmak İçin Ek Tuş:"))
+        self.up_combo = QComboBox()
+        self.opts = {"+ (Artı veya Num+)": "plus", "- (Eksi veya Num-)": "minus", "Yukarı Ok": "up", "Aşağı Ok": "down", "Sağ Ok": "right", "Sol Ok": "left"}
+        self.up_combo.addItems(list(self.opts.keys()))
+        
+        up_val = parent.settings.get("vol_up_key", "plus")
+        matching_up = [k for k,v in self.opts.items() if v == up_val]
+        if matching_up: self.up_combo.setCurrentText(matching_up[0])
+        layout.addWidget(self.up_combo)
+        
+        layout.addWidget(QLabel("Sesi Azaltmak İçin Ek Tuş:"))
+        self.down_combo = QComboBox()
+        self.down_combo.addItems(list(self.opts.keys()))
+        
+        down_val = parent.settings.get("vol_down_key", "minus")
+        matching_down = [k for k,v in self.opts.items() if v == down_val]
+        if matching_down: self.down_combo.setCurrentText(matching_down[0])
+        layout.addWidget(self.down_combo)
+        
+        save_btn = QPushButton("💾 Kısayolları Kaydet")
+        save_btn.setStyleSheet("background-color: #1DB954; color: black; font-weight: bold; padding: 10px;")
+        save_btn.clicked.connect(self.save_keys)
+        layout.addWidget(save_btn)
+        self.setLayout(layout)
+        
+    def save_keys(self):
+        self.parent_app.settings["vol_up_key"] = list(self.opts.values())[self.up_combo.currentIndex()]
+        self.parent_app.settings["vol_down_key"] = list(self.opts.values())[self.down_combo.currentIndex()]
+        self.parent_app.save_settings(silent=False)
+        self.accept()
 
 class SpotifySkipperApp(QWidget):
     def __init__(self):
@@ -460,6 +534,7 @@ class SpotifySkipperApp(QWidget):
         self.signals.add_point.connect(self.overlay.add_point)
         self.signals.finish_gesture.connect(self.overlay.finish_gesture)
         self.signals.clear_path.connect(self.overlay.clear_path)
+        self.signals.immediate_clear.connect(self.overlay.immediate_clear)
         
         self.is_key_pressed = False
         
@@ -513,42 +588,56 @@ class SpotifySkipperApp(QWidget):
         self.title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title_label)
         
-        gesture_btn = QPushButton("🎨 Özel Şekiller (Gestures) Oluştur")
-        gesture_btn.setCursor(Qt.PointingHandCursor)
-        gesture_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #E91E63;
-                color: white;
-                font-size: 15px;
-                font-weight: bold;
-                padding: 12px;
-                border-radius: 6px;
-            }
-            QPushButton:hover { background-color: #C2185B; }
-        """)
-        gesture_btn.clicked.connect(self.open_gesture_recorder)
-        layout.addWidget(gesture_btn)
-        
-        prof_layout = QHBoxLayout()
-        prof_layout.addWidget(QLabel("<b>Aktif Çizim Profili:</b>"))
-        self.gesture_profile_combo = QComboBox()
-        self.update_gesture_profiles_ui()
-        self.gesture_profile_combo.currentIndexChanged.connect(self.on_gesture_profile_changed)
-        prof_layout.addWidget(self.gesture_profile_combo)
-        layout.addLayout(prof_layout)
+        # 1. GENEL AYARLAR
+        general_group = QGroupBox("Genel Tetikleyici ve Başlangıç")
+        general_layout = QVBoxLayout()
         
         trigger_layout = QHBoxLayout()
-        trigger_layout.addWidget(QLabel("<b>Tetikleyici Tuş (Kısayol):</b>"))
+        trigger_layout.addWidget(QLabel("<b>Ana Tetikleyici Tuş (Her İkisi İçin):</b>"))
         self.trigger_combo = QComboBox()
         self.trigger_combo.addItems(["Sol CTRL", "Sağ CTRL", "Sol ALT", "Sol SHIFT"])
         tm = {"ctrl_l": 0, "ctrl_r": 1, "alt_l": 2, "shift_l": 3}
         self.trigger_combo.setCurrentIndex(tm.get(self.settings.get("trigger_key", "ctrl_l"), 0))
         self.trigger_combo.currentIndexChanged.connect(self.on_trigger_changed)
         trigger_layout.addWidget(self.trigger_combo)
-        layout.addLayout(trigger_layout)
+        general_layout.addLayout(trigger_layout)
+        
+        self.startup_checkbox = QCheckBox("Windows ile birlikte arka planda başlat")
+        self.startup_checkbox.setChecked(self.settings.get("run_on_startup", False))
+        self.startup_checkbox.toggled.connect(self.on_startup_toggled)
+        general_layout.addWidget(self.startup_checkbox)
+        
+        general_group.setLayout(general_layout)
+        layout.addWidget(general_group)
+        
+        # 2. ÇİZİM GURUBU (GESTURES)
+        self.gesture_main_cb = QCheckBox("🎨 Çizim ile Şarkı Kontrolü (Sonraki, Önceki vb.)")
+        self.gesture_main_cb.setStyleSheet("font-weight: bold; font-size: 14px; margin-top:10px;")
+        self.gesture_main_cb.setChecked(self.settings.get("use_gesture", True))
+        self.gesture_main_cb.toggled.connect(self.toggle_gesture_frame)
+        layout.addWidget(self.gesture_main_cb)
+        
+        self.gesture_frame = QFrame()
+        self.gesture_frame.setStyleSheet("QFrame { background-color: #222; border-radius: 8px; border: 1px solid #444; }")
+        gesture_layout = QVBoxLayout()
+        gesture_layout.setContentsMargins(10, 10, 10, 10)
+        
+        gesture_btn = QPushButton("🎨 Özel Şekiller Oluştur / Yönet")
+        gesture_btn.setCursor(Qt.PointingHandCursor)
+        gesture_btn.setStyleSheet("QPushButton { background-color: #E91E63; color: white; font-size: 13px; font-weight: bold; padding: 10px; border-radius: 6px; } QPushButton:hover { background-color: #C2185B; }")
+        gesture_btn.clicked.connect(self.open_gesture_recorder)
+        gesture_layout.addWidget(gesture_btn)
+        
+        prof_layout = QHBoxLayout()
+        prof_layout.addWidget(QLabel("Aktif Çizim Profili:"))
+        self.gesture_profile_combo = QComboBox()
+        self.update_gesture_profiles_ui()
+        self.gesture_profile_combo.currentIndexChanged.connect(self.on_gesture_profile_changed)
+        prof_layout.addWidget(self.gesture_profile_combo)
+        gesture_layout.addLayout(prof_layout)
         
         theme_layout = QHBoxLayout()
-        theme_layout.addWidget(QLabel("<b>Neon Renk Teması:</b>"))
+        theme_layout.addWidget(QLabel("Neon Renk Teması:"))
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Neon Yeşil (Spotify)", "Siber Pembe (Cyberpunk)", "Ateş Kırmızısı (Sith)", "Buz Mavisi (Glacier)", "Özel Profil (Custom)"])
         theme_map = {"spotify": 0, "cyberpunk": 1, "sith": 2, "glacier": 3, "custom": 4}
@@ -560,24 +649,43 @@ class SpotifySkipperApp(QWidget):
         self.custom_btn.clicked.connect(self.open_custom_modal)
         self.custom_btn.setVisible(idx == 4)
         theme_layout.addWidget(self.custom_btn)
-        layout.addLayout(theme_layout)
+        gesture_layout.addLayout(theme_layout)
         
-        layout.addWidget(QLabel("<b>Diğer Ayarlar:</b>"))
-        
-        self.strict_pos_checkbox = QCheckBox("Konuma Duyarlı (Sadece Öğretilen Yerde Çalışır)")
+        self.strict_pos_checkbox = QCheckBox("Konuma Duyarlı (Sadece Öğretilen Yerde)")
         self.strict_pos_checkbox.setChecked(self.settings.get("strict_position", False))
         self.strict_pos_checkbox.toggled.connect(lambda c: self.update_setting("strict_position", c))
-        layout.addWidget(self.strict_pos_checkbox)
+        gesture_layout.addWidget(self.strict_pos_checkbox)
         
-        self.show_trail_checkbox = QCheckBox("Ekranda Çizim Çizgisini (Neon) Göster")
+        self.show_trail_checkbox = QCheckBox("Çizim Çizgisini (Neon) Göster")
         self.show_trail_checkbox.setChecked(self.settings.get("show_trail", True))
         self.show_trail_checkbox.toggled.connect(lambda c: self.update_setting("show_trail", c))
-        layout.addWidget(self.show_trail_checkbox)
+        gesture_layout.addWidget(self.show_trail_checkbox)
         
-        self.startup_checkbox = QCheckBox("Windows ile birlikte başlat")
-        self.startup_checkbox.setChecked(self.settings.get("run_on_startup", False))
-        self.startup_checkbox.toggled.connect(self.on_startup_toggled)
-        layout.addWidget(self.startup_checkbox)
+        self.gesture_frame.setLayout(gesture_layout)
+        self.gesture_frame.setVisible(self.gesture_main_cb.isChecked())
+        layout.addWidget(self.gesture_frame)
+        
+        # 3. KISAYOL GURUBU (SHORTCUTS)
+        self.shortcut_main_cb = QCheckBox("⌨️ Klavye Kısayolları ile Gelişmiş Ses Kontrolü")
+        self.shortcut_main_cb.setStyleSheet("font-weight: bold; font-size: 14px; margin-top:5px;")
+        self.shortcut_main_cb.setChecked(self.settings.get("use_shortcuts", True))
+        self.shortcut_main_cb.toggled.connect(self.toggle_shortcut_frame)
+        layout.addWidget(self.shortcut_main_cb)
+        
+        self.shortcut_frame = QFrame()
+        self.shortcut_frame.setStyleSheet("QFrame { background-color: #222; border-radius: 8px; border: 1px solid #444; }")
+        shortcut_layout = QVBoxLayout()
+        shortcut_layout.setContentsMargins(10, 10, 10, 10)
+        
+        shortcut_btn = QPushButton("⌨️ Kısayol Tuşlarını Düzenle (Spotify Özel)")
+        shortcut_btn.setCursor(Qt.PointingHandCursor)
+        shortcut_btn.setStyleSheet("QPushButton { background-color: #2b2b2b; color: white; font-size: 13px; font-weight: bold; padding: 10px; border-radius: 6px; border: 2px solid #555; } QPushButton:hover { background-color: #3b3b3b; }")
+        shortcut_btn.clicked.connect(self.open_shortcuts_modal)
+        shortcut_layout.addWidget(shortcut_btn)
+        
+        self.shortcut_frame.setLayout(shortcut_layout)
+        self.shortcut_frame.setVisible(self.shortcut_main_cb.isChecked())
+        layout.addWidget(self.shortcut_frame)
         
         layout.addStretch()
         
@@ -592,6 +700,14 @@ class SpotifySkipperApp(QWidget):
         layout.addWidget(self.hide_button)
         
         self.setLayout(layout)
+
+    def toggle_gesture_frame(self, checked):
+        self.gesture_frame.setVisible(checked)
+        self.update_setting("use_gesture", checked)
+        
+    def toggle_shortcut_frame(self, checked):
+        self.shortcut_frame.setVisible(checked)
+        self.update_setting("use_shortcuts", checked)
 
     def update_gesture_profiles_ui(self):
         self.gesture_profile_combo.blockSignals(True)
@@ -625,6 +741,10 @@ class SpotifySkipperApp(QWidget):
 
     def open_gesture_recorder(self):
         modal = GestureRecorderWindow(self.gestures_mgr, self)
+        modal.exec()
+
+    def open_shortcuts_modal(self):
+        modal = ShortcutSettingsModal(self)
         modal.exec()
 
     def on_theme_changed(self, index):
@@ -700,21 +820,68 @@ class SpotifySkipperApp(QWidget):
 
     def on_press(self, key):
         if key == self.get_trigger_key():
-            self.is_key_pressed = True
-            self.drawing_started = False
-            self.draw_start_x = None
-            self.draw_start_y = None
-            self.draw_history.clear()
+            if not self.is_key_pressed:
+                self.is_key_pressed = True
+                if self.settings.get("use_gesture", True):
+                    self.drawing_started = False
+                    self.draw_start_x = None
+                    self.draw_start_y = None
+                    self.draw_history.clear()
+                    self.signals.immediate_clear.emit()
+        elif self.is_key_pressed and self.settings.get("use_shortcuts", True):
+            try:
+                vk = getattr(key, 'vk', getattr(getattr(key, 'value', None), 'vk', None)) if hasattr(key, 'value') else getattr(key, 'vk', None)
+                ch = getattr(key, 'char', None)
+            except:
+                vk = None; ch = None
+            key_name = ""
+            key_str = str(key).strip("'")
+            if ch in ['+', '='] or vk in (107, 187) or key_str in ['+', '<107>']: key_name = "plus"
+            elif ch == '-' or vk in (109, 189) or key_str in ['-', '<109>']: key_name = "minus"
+            elif key == keyboard.Key.up or key_str == 'Key.up': key_name = "up"
+            elif key == keyboard.Key.down or key_str == 'Key.down': key_name = "down"
+            elif key == keyboard.Key.right or key_str == 'Key.right': key_name = "right"
+            elif key == keyboard.Key.left or key_str == 'Key.left': key_name = "left"
+            
+            up_trigger = self.settings.get("vol_up_key", "plus")
+            down_trigger = self.settings.get("vol_down_key", "minus")
+            
+            if key_name == up_trigger:
+                vol = self.adjust_spotify_volume(up=True)
+                if vol is not None: self.signals.finish_gesture.emit(f"Ses: %{vol} 🔊")
+            elif key_name == down_trigger:
+                vol = self.adjust_spotify_volume(up=False)
+                if vol is not None: self.signals.finish_gesture.emit(f"Ses: %{vol} 🔉")
 
     def on_release(self, key):
         if key == self.get_trigger_key():
             self.is_key_pressed = False
-            if self.drawing_started:
-                self.analyze_new_gesture()
-            else:
-                self.signals.clear_path.emit()
-            self.drawing_started = False
-            self.draw_history.clear()
+            if self.settings.get("use_gesture", True):
+                if self.drawing_started:
+                    self.analyze_new_gesture()
+                else:
+                    self.signals.clear_path.emit()
+                self.drawing_started = False
+                self.draw_history.clear()
+
+    def adjust_spotify_volume(self, up=True):
+        try:
+            import comtypes
+            comtypes.CoInitialize()
+            from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+            sessions = AudioUtilities.GetAllSessions()
+            for session in sessions:
+                if session.Process and session.Process.name().lower() == "spotify.exe":
+                    volume = session._ctl.QueryInterface(ISimpleAudioVolume)
+                    current_vol = volume.GetMasterVolume()
+                    new_vol = min(1.0, current_vol + 0.1) if up else max(0.0, current_vol - 0.1)
+                    volume.SetMasterVolume(new_vol, None)
+                    comtypes.CoUninitialize()
+                    return int(new_vol * 100)
+            comtypes.CoUninitialize()
+        except Exception as e:
+            print("Spotify ses kontrol hatasi:", e)
+        return None
 
     def analyze_new_gesture(self):
         if len(self.draw_history) < 2:
@@ -737,8 +904,8 @@ class SpotifySkipperApp(QWidget):
             return
             
         # AKILLI ŞABLON KARŞILAŞTIRMA MANTIĞI
-        # Threshold devasa bir sayı yapılarak "tıpatıp aynısı" yerine "en çok benzeyeni" seçmesi sağlandı.
-        best_template, score = recognizer.recognize(self.draw_history, templates, threshold=5000.0)
+        # Benzerlik daha katı yapıldı (threshold düşürüldü)
+        best_template, score = recognizer.recognize(self.draw_history, templates, threshold=65.0)
         
         if best_template:
             # KONUM KONTROLÜ
@@ -764,19 +931,28 @@ class SpotifySkipperApp(QWidget):
             action = best_template["action"]
             name = best_template["name"]
             
-            key_mapped = getattr(keyboard.Key, action, None)
-            if key_mapped:
-                keyboard_controller.press(key_mapped)
-                keyboard_controller.release(key_mapped)
-                
-            icon = "👉" if "Sonraki" in name else "👈" if "Önceki" in name else "⏯" if "Oynat" in name else "🔇" if "Ses" in name else "✨"
-            self.signals.finish_gesture.emit(f"{name} {icon}")
+            if action.startswith("spotify_vol_"):
+                up = (action == "spotify_vol_up")
+                vol_pct = self.adjust_spotify_volume(up=up)
+                icon = "🔊" if up else "🔉"
+                if vol_pct is not None:
+                    self.signals.finish_gesture.emit(f"Spotify Ses: %{vol_pct} {icon}")
+                else:
+                    self.signals.finish_gesture.emit(f"{name} (Spotify Kapalı) ❌")
+            else:
+                key_mapped = getattr(keyboard.Key, action, None)
+                if key_mapped:
+                    keyboard_controller.press(key_mapped)
+                    keyboard_controller.release(key_mapped)
+                    
+                icon = "👉" if "Sonraki" in name else "👈" if "Önceki" in name else "⏯" if "Oynat" in name else "🔇" if "Ses" in name else "✨"
+                self.signals.finish_gesture.emit(f"{name} {icon}")
         else:
             self.signals.finish_gesture.emit("Bilinmeyen Şekil ❓")
 
     def on_move(self, x, y):
         # Yalnızca Yeni Şekil Çizim Motoru var. Eski Edge Swap kodu tamamen silindi.
-        if self.is_key_pressed:
+        if self.is_key_pressed and self.settings.get("use_gesture", True):
             if not self.drawing_started:
                 if self.draw_start_x is None:
                     self.draw_start_x = x

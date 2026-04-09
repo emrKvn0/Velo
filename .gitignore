@@ -20,3 +20,17 @@ Thumbs.db
 # User Settings and Custom Gestures
 settings.json
 gestures.json
+
+# Logs
+*.log
+
+# PyInstaller & Build artifacts
+build/
+dist/
+*.spec
+
+# Python Distribution / Packaging
+*.egg-info/
+.eggs/
+.pytest_cache/
+.tox/
