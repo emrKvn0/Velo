@@ -8,18 +8,26 @@ import collections
 import winreg
 import math
 
-from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, 
+# Windows DPI Awareness (Fare offset'ini düzeltmek için kritik)
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(2) # PROCESS_PER_MONITOR_DPI_AWARE
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+from PySide6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QCheckBox, QPushButton, QSystemTrayIcon, 
-                               QMenu, QStyle)
-from PySide6.QtGui import QIcon, QAction, QPainter, QPen, QColor, QFont
+                               QMenu, QStyle, QComboBox, QDialog, QColorDialog,
+                               QMessageBox)
+from PySide6.QtGui import QIcon, QAction, QPainter, QPen, QColor, QFont, QCursor, QPalette
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QPoint
 
 from pynput import mouse, keyboard
 
-# Medya tuşlarını kontrol edeceğimiz obje
 keyboard_controller = keyboard.Controller()
 
-# Dinamik Ekran Boyutlarını Al (Varlığı korunsun ama Overlay kendi de hesaplıyor)
 user32 = ctypes.windll.user32
 SCREEN_LEFT = user32.GetSystemMetrics(76)
 SCREEN_TOP = user32.GetSystemMetrics(77)
@@ -27,7 +35,6 @@ SCREEN_WIDTH = user32.GetSystemMetrics(78)
 SCREEN_HEIGHT = user32.GetSystemMetrics(79)
 SCREEN_RIGHT = SCREEN_LEFT + SCREEN_WIDTH - 1
 
-# Pynput Hareket Ayarları
 REQUIRED_KEY = keyboard.Key.ctrl_l
 TIME_WINDOW = 0.4
 EDGE_TOLERANCE = 5
@@ -40,26 +47,73 @@ SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "settings.json")
 
 
 class GestureSignals(QObject):
-    add_point = Signal(int, int)
+    add_point = Signal()
     finish_gesture = Signal(str)
     clear_path = Signal()
 
 
+class CustomThemeModal(QDialog):
+    def __init__(self, parent=None, current_main="#1DB954", current_glow="#1DB954"):
+        super().__init__(parent)
+        self.setWindowTitle("🎨 Özel Tema Profiliniz")
+        self.resize(320, 200)
+        self.main_color = QColor(current_main)
+        self.glow_color = QColor(current_glow)
+        
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        
+        info = QLabel("Kendi neon renklerinizi seçin:")
+        info.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(info)
+        
+        self.main_btn = QPushButton("Ana Çizgi Rengini Seç")
+        self.main_btn.setCursor(Qt.PointingHandCursor)
+        self.main_btn.setStyleSheet(f"background-color: {self.main_color.name()}; color: black; font-weight: bold; padding: 10px; border-radius: 5px;")
+        self.main_btn.clicked.connect(self.pick_main)
+        layout.addWidget(self.main_btn)
+        
+        self.glow_btn = QPushButton("Dış Parlama (Neon) Rengini Seç")
+        self.glow_btn.setCursor(Qt.PointingHandCursor)
+        self.glow_btn.setStyleSheet(f"background-color: {self.glow_color.name()}; color: black; font-weight: bold; padding: 10px; border-radius: 5px;")
+        self.glow_btn.clicked.connect(self.pick_glow)
+        layout.addWidget(self.glow_btn)
+        
+        save_btn = QPushButton("Kaydet ve Kapat")
+        save_btn.setCursor(Qt.PointingHandCursor)
+        save_btn.setStyleSheet("background-color: #333333; color: white; padding: 10px; border-radius: 5px;")
+        save_btn.clicked.connect(self.accept)
+        layout.addWidget(save_btn)
+        
+        self.setLayout(layout)
+        
+    def pick_main(self):
+        color = QColorDialog.getColor(self.main_color, self, "Ana Çizgi Rengi")
+        if color.isValid():
+            self.main_color = color
+            self.main_btn.setStyleSheet(f"background-color: {color.name()}; color: black; font-weight: bold; padding: 10px; border-radius: 5px;")
+            
+    def pick_glow(self):
+        color = QColorDialog.getColor(self.glow_color, self, "Neon Rengi Seç")
+        if color.isValid():
+            self.glow_color = color
+            self.glow_btn.setStyleSheet(f"background-color: {color.name()}; color: black; font-weight: bold; padding: 10px; border-radius: 5px;")
+
+
 class OverlayWindow(QWidget):
-    def __init__(self):
+    def __init__(self, settings_ref):
         super().__init__()
+        self.app_settings = settings_ref
+        
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         
-        # Çoklu monitör kapsama
         v_left = user32.GetSystemMetrics(76)
         v_top = user32.GetSystemMetrics(77)
         v_width = user32.GetSystemMetrics(78)
         v_height = user32.GetSystemMetrics(79)
         self.setGeometry(v_left, v_top, v_width, v_height)
-        self.offset_x = v_left
-        self.offset_y = v_top
         
         self.path = []
         self.last_text = ""
@@ -69,26 +123,44 @@ class OverlayWindow(QWidget):
         self.fade_timer = QTimer()
         self.fade_timer.timeout.connect(self.fade_step)
         
-    def add_point(self, x, y):
+    def get_colors(self):
+        theme = self.app_settings.get("theme", "spotify")
+        if theme == "cyberpunk":
+            return QColor(255, 105, 180), QColor(255, 0, 255)
+        elif theme == "sith":
+            return QColor(255, 100, 100), QColor(255, 0, 0)
+        elif theme == "glacier":
+            return QColor(150, 255, 255), QColor(0, 150, 255)
+        elif theme == "custom":
+            return QColor(self.app_settings.get("custom_main", "#ffffff")), QColor(self.app_settings.get("custom_glow", "#1DB954"))
+        
+        # Default Spotify
+        return QColor(29, 185, 84), QColor(29, 185, 84)
+        
+    def add_point(self):
+        # QCursor ile fare koordinatını %100 hassasiyetle (Offset olmadan) çekiyoruz
+        cursor_pos = QCursor.pos()
+        local_pt = self.mapFromGlobal(cursor_pos)
+        
         self.fade_timer.stop()
         self.fade_alpha = 255
-        self.text_alpha = 0  # Yeni çizimde eski yazıyı gizle
+        self.text_alpha = 0
         
-        self.path.append((x - self.offset_x, y - self.offset_y))
+        self.path.append((local_pt.x(), local_pt.y()))
         self.update()
         
     def finish_gesture(self, text):
         self.last_text = text
         self.text_alpha = 255
-        self.fade_timer.start(25) # Kaybolma animasyonu başlat
+        self.fade_timer.start(20)
         
     def clear_path(self):
-        self.fade_timer.start(25)
+        self.fade_timer.start(20)
         
     def fade_step(self):
         needs_update = False
         if self.fade_alpha > 0:
-            self.fade_alpha = max(0, self.fade_alpha - 10)
+            self.fade_alpha = max(0, self.fade_alpha - 12)
             needs_update = True
         else:
             if self.path:
@@ -107,10 +179,10 @@ class OverlayWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Çizgiyi Parıltılı Çiz (Neon Efekti)
         if len(self.path) >= 2 and self.fade_alpha > 0:
-            # Dış Parlama (Glow)
-            glow_color = QColor(29, 185, 84, int(self.fade_alpha * 0.4))
+            main_c, glow_c = self.get_colors()
+            
+            glow_color = QColor(glow_c.red(), glow_c.green(), glow_c.blue(), int(self.fade_alpha * 0.45))
             pen_glow = QPen(glow_color)
             pen_glow.setWidth(14)
             pen_glow.setCapStyle(Qt.RoundCap)
@@ -121,8 +193,7 @@ class OverlayWindow(QWidget):
                 p2 = self.path[i+1]
                 painter.drawLine(p1[0], p1[1], p2[0], p2[1])
             
-            # Ana Çizgi
-            main_color = QColor(29, 185, 84, self.fade_alpha)
+            main_color = QColor(main_c.red(), main_c.green(), main_c.blue(), self.fade_alpha)
             pen_main = QPen(main_color)
             pen_main.setWidth(6)
             pen_main.setCapStyle(Qt.RoundCap)
@@ -133,7 +204,6 @@ class OverlayWindow(QWidget):
                 p2 = self.path[i+1]
                 painter.drawLine(p1[0], p1[1], p2[0], p2[1])
                 
-        # Animasyonlu Toast Yazısı Çiz
         if self.text_alpha > 0 and self.last_text:
             text_color = QColor(255, 255, 255, self.text_alpha)
             bg_color = QColor(20, 20, 20, int(self.text_alpha * 0.8))
@@ -147,20 +217,25 @@ class OverlayWindow(QWidget):
             pad_x = 40
             pad_y = 20
             bg_rect = rect.adjusted(-pad_x, -pad_y, pad_x, pad_y)
-            bg_rect.moveCenter(QPoint(int(w_width / 2) - self.offset_x, int(w_height / 3) - self.offset_y))
+            
+            # Dinamik konumlama (Ortaya yakın)
+            local_center_x = int(w_width / 2) - self.geometry().x()
+            local_center_y = int(w_height / 3) - self.geometry().y()
+            bg_rect.moveCenter(QPoint(local_center_x, local_center_y))
             
             painter.setPen(Qt.NoPen)
             painter.setBrush(bg_color)
             painter.drawRoundedRect(bg_rect, 20, 20)
             
-            border_pen = QPen(QColor(29, 185, 84, self.text_alpha))
+            main_c, glow_c = self.get_colors()
+            border_pen = QPen(QColor(glow_c.red(), glow_c.green(), glow_c.blue(), self.text_alpha))
             border_pen.setWidth(3)
             painter.setPen(border_pen)
             painter.drawRoundedRect(bg_rect, 20, 20)
             
             painter.setPen(text_color)
-            x_pos = int(w_width / 2) - int(rect.width() / 2) - self.offset_x
-            y_pos = int(w_height / 3) + int(rect.height() / 4) - self.offset_y
+            x_pos = local_center_x - int(rect.width() / 2)
+            y_pos = local_center_y + int(rect.height() / 4)
             painter.drawText(x_pos, y_pos, self.last_text)
 
 
@@ -170,20 +245,21 @@ class SpotifySkipperApp(QWidget):
         
         self.settings = {
             "ctrl_lock": True,
-            "run_on_startup": False
+            "run_on_startup": False,
+            "theme": "spotify",
+            "custom_main": "#ffffff",
+            "custom_glow": "#1DB954"
         }
         self.load_settings()
         
-        # Sinyaller ve Overlay ekranı
         self.signals = GestureSignals()
-        self.overlay = OverlayWindow()
+        self.overlay = OverlayWindow(self.settings)
         self.overlay.show()
         
         self.signals.add_point.connect(self.overlay.add_point)
         self.signals.finish_gesture.connect(self.overlay.finish_gesture)
         self.signals.clear_path.connect(self.overlay.clear_path)
         
-        # Hareket takip değişkenleri
         self.history = collections.deque()
         self.last_trigger_time = 0
         self.is_key_pressed = False
@@ -208,16 +284,19 @@ class SpotifySkipperApp(QWidget):
             except Exception:
                 pass
 
-    def save_settings(self):
+    def save_settings(self, silent=True):
         try:
             with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.settings, f, indent=4)
-        except Exception:
-            pass
+            if not silent:
+                QMessageBox.information(self, "Başarılı", "✅ Ayarlarınız tümüyle kaydedildi!")
+        except Exception as e:
+            if not silent:
+                QMessageBox.warning(self, "Hata", f"Kaydedilirken bir sorun oluştu: {e}")
 
     def init_ui(self):
-        self.setWindowTitle("Spotify Skipper V2")
-        self.resize(440, 340)
+        self.setWindowTitle("Spotify Skipper V2 - Profiller")
+        self.resize(480, 420)
         
         layout = QVBoxLayout()
         layout.setSpacing(12)
@@ -227,18 +306,6 @@ class SpotifySkipperApp(QWidget):
         self.title_label.setStyleSheet("font-size: 26px; font-weight: bold; color: #1DB954;")
         self.title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(self.title_label)
-        
-        self.subtitle_label = QLabel("YENİ: İstediğiniz yere çizerek medya kontrolü sağlayın!")
-        self.subtitle_label.setStyleSheet("""
-            background-color: #E91E63; 
-            color: white; 
-            font-size: 11px; 
-            font-weight: bold; 
-            border-radius: 4px; 
-            padding: 5px;
-        """)
-        self.subtitle_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.subtitle_label)
         
         guide_text = (
             "<div style='line-height: 1.5;'>"
@@ -251,30 +318,73 @@ class SpotifySkipperApp(QWidget):
             "</div>"
         )
         self.guide_label = QLabel(guide_text)
-        self.guide_label.setStyleSheet("""
-            background-color: #222222; 
-            color: #eeeeee; 
-            padding: 15px; 
-            border-radius: 8px; 
-            font-size: 13px;
-        """)
+        self.guide_label.setStyleSheet("background-color: #222222; color: #eeeeee; padding: 15px; border-radius: 8px; font-size: 13px;")
         layout.addWidget(self.guide_label)
         
         layout.addSpacing(5)
         
-        self.ctrl_checkbox = QCheckBox("Akıllı Çizim Modunu Aktifleştir (Önerilen)")
-        self.ctrl_checkbox.setChecked(self.settings["ctrl_lock"])
+        # TEMA ve PROFİL SEÇİCİ
+        theme_layout = QHBoxLayout()
+        theme_label = QLabel("Çizim Profili:")
+        theme_label.setStyleSheet("font-weight: bold; font-size: 13px;")
+        theme_layout.addWidget(theme_label)
+        
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([
+            "Neon Yeşil (Spotify)",
+            "Siber Pembe (Cyberpunk)",
+            "Ateş Kırmızısı (Sith)",
+            "Buz Mavisi (Glacier)",
+            "Özel Profil (Custom)"
+        ])
+        
+        theme_map = {"spotify": 0, "cyberpunk": 1, "sith": 2, "glacier": 3, "custom": 4}
+        idx = theme_map.get(self.settings.get("theme", "spotify"), 0)
+        self.theme_combo.setCurrentIndex(idx)
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
+        theme_layout.addWidget(self.theme_combo)
+        
+        self.custom_btn = QPushButton("⚙️ Özel Rengi Ayarla")
+        self.custom_btn.setCursor(Qt.PointingHandCursor)
+        self.custom_btn.clicked.connect(self.open_custom_modal)
+        self.custom_btn.setVisible(idx == 4)
+        theme_layout.addWidget(self.custom_btn)
+        
+        layout.addLayout(theme_layout)
+        
+        # Ayarlar
+        self.ctrl_checkbox = QCheckBox("Akıllı Çizim Modunu Aktifleştir")
+        self.ctrl_checkbox.setChecked(self.settings.get("ctrl_lock", True))
         self.ctrl_checkbox.setStyleSheet("font-size: 13px; font-weight: bold;")
         self.ctrl_checkbox.toggled.connect(self.on_ctrl_toggled)
         layout.addWidget(self.ctrl_checkbox)
         
         self.startup_checkbox = QCheckBox("Windows ile birlikte başlat")
-        self.startup_checkbox.setChecked(self.settings["run_on_startup"])
+        self.startup_checkbox.setChecked(self.settings.get("run_on_startup", False))
         self.startup_checkbox.setStyleSheet("font-size: 13px;")
         self.startup_checkbox.toggled.connect(self.on_startup_toggled)
         layout.addWidget(self.startup_checkbox)
         
         layout.addStretch()
+        
+        # KAYDET BUTONU YENİ EKLENDİ
+        self.save_btn = QPushButton("💾 Tüm Ayarları Kaydet")
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1DB954;
+                color: black;
+                padding: 10px;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #1ed760;
+            }
+        """)
+        self.save_btn.clicked.connect(lambda: self.save_settings(silent=False))
+        layout.addWidget(self.save_btn)
         
         self.hide_button = QPushButton("Arka Plana Gizle")
         self.hide_button.setCursor(Qt.PointingHandCursor)
@@ -287,15 +397,26 @@ class SpotifySkipperApp(QWidget):
                 font-weight: bold;
                 font-size: 14px;
             }
-            QPushButton:hover {
-                background-color: #1DB954;
-                color: black;
-            }
+            QPushButton:hover { background-color: #444444; }
         """)
         self.hide_button.clicked.connect(self.hide)
         layout.addWidget(self.hide_button)
         
         self.setLayout(layout)
+
+    def on_theme_changed(self, index):
+        keys = ["spotify", "cyberpunk", "sith", "glacier", "custom"]
+        self.settings["theme"] = keys[index]
+        self.custom_btn.setVisible(index == 4)
+        self.save_settings(silent=True)
+
+    def open_custom_modal(self):
+        modal = CustomThemeModal(self, self.settings["custom_main"], self.settings["custom_glow"])
+        if modal.exec():
+            self.settings["custom_main"] = modal.main_color.name()
+            self.settings["custom_glow"] = modal.glow_color.name()
+            self.save_settings(silent=True)
+            QMessageBox.information(self, "Profil", "Özel profil renkleriniz ayarlandı!")
 
     def setup_tray_icon(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -334,27 +455,24 @@ class SpotifySkipperApp(QWidget):
 
     def on_ctrl_toggled(self, checked):
         self.settings["ctrl_lock"] = checked
-        self.save_settings()
+        self.save_settings(silent=True)
         
     def on_startup_toggled(self, checked):
         self.settings["run_on_startup"] = checked
-        self.save_settings()
+        self.save_settings(silent=True)
         self.set_startup_registry(checked)
 
     def set_startup_registry(self, enabled):
         key = winreg.HKEY_CURRENT_USER
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
         app_name = "SpotifySkipper"
-        
         try:
             registry_key = winreg.OpenKey(key, key_path, 0, winreg.KEY_ALL_ACCESS)
             python_exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
             if not os.path.exists(python_exe):
                 python_exe = sys.executable
-                
             script_path = os.path.abspath(__file__)
             command = f'"{python_exe}" "{script_path}"'
-            
             if enabled:
                 winreg.SetValueEx(registry_key, app_name, 0, winreg.REG_SZ, command)
             else:
@@ -388,7 +506,6 @@ class SpotifySkipperApp(QWidget):
                 self.analyze_new_gesture()
             else:
                 self.signals.clear_path.emit()
-                
             self.drawing_started = False
             self.draw_history.clear()
 
@@ -404,7 +521,7 @@ class SpotifySkipperApp(QWidget):
         dy = end_y - start_y
         
         dist = math.hypot(dx, dy)
-        if dist < 80: # Minimal anlamlı çizim mesafesi
+        if dist < 80:
             self.signals.clear_path.emit()
             return
             
@@ -429,27 +546,26 @@ class SpotifySkipperApp(QWidget):
 
     def on_move(self, x, y):
         # YENİ MOD: Ekranda Çizim Yapma
-        if self.settings["ctrl_lock"]:
+        if self.settings.get("ctrl_lock", True):
             if self.is_key_pressed:
                 if not self.drawing_started:
                     if self.draw_start_x is None:
                         self.draw_start_x = x
                         self.draw_start_y = y
                     dist = math.hypot(x - self.draw_start_x, y - self.draw_start_y)
-                    if dist > 20: # Spam engelleme için asgari çekme payı
+                    if dist > 20: 
                         self.drawing_started = True
                         self.draw_history.append((self.draw_start_x, self.draw_start_y))
-                        self.signals.add_point.emit(self.draw_start_x, self.draw_start_y)
+                        self.signals.add_point.emit()
                 
                 if self.drawing_started:
                     self.draw_history.append((x, y))
-                    self.signals.add_point.emit(x, y)
+                    self.signals.add_point.emit()
             return
 
-        # ESKİ MOD: Köşelere kaydırma takibi (Ctrl kapalıysa)
+        # ESKİ MOD: Köşelere kaydırma (Fallback)
         current_time = time.time()
         self.history.append((current_time, x, y))
-        
         while self.history and current_time - self.history[0][0] > TIME_WINDOW:
             self.history.popleft()
             
@@ -458,12 +574,10 @@ class SpotifySkipperApp(QWidget):
             if not at_left_edge and (x <= EDGE_TOLERANCE): 
                 at_left_edge = True
             at_right_edge = (x >= SCREEN_RIGHT - EDGE_TOLERANCE)
-            
             if (at_left_edge or at_right_edge) and y < MAX_Y_LIMIT and len(self.history) >= 2:
                 start_t, start_x, start_y = self.history[0]
                 dx = x - start_x
                 dy = y - start_y
-                
                 if dy > MIN_DY:  
                     if at_left_edge and dx < -MIN_DX:
                         keyboard_controller.press(keyboard.Key.media_previous)
@@ -480,9 +594,7 @@ class SpotifySkipperApp(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    
-    # Modern koyu tema
-    from PySide6.QtGui import QPalette
+
     palette = QPalette()
     palette.setColor(QPalette.Window, QColor(40, 40, 40))
     palette.setColor(QPalette.WindowText, Qt.white)
