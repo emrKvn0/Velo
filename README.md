@@ -25,7 +25,7 @@
 
 1. Projeyi bilgisayarınıza klonlayın veya indirin:
    ```bash
-   git clone https://github.com/kullaniciadiniz/spotify-skipper.git
+   git clone https://github.com/emrKvn0/Velo.git
    cd spotify-skipper
    ```
 2. Gerekli kütüphaneleri yükleyin:
@@ -65,7 +65,7 @@
 
 1. Clone or download the repository to your local machine:
    ```bash
-   git clone https://github.com/yourusername/spotify-skipper.git
+   git clone https://github.com/emrKvn0/Velo.git
    cd spotify-skipper
    ```
 2. Install the required dependencies:
