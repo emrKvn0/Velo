@@ -388,7 +388,7 @@ class OverlayWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        if len(self.path) >= 2 and self.fade_alpha > 0:
+        if self.app_settings.get("show_trail", True) and len(self.path) >= 2 and self.fade_alpha > 0:
             main_c, glow_c = self.get_colors()
             glow_color = QColor(glow_c.red(), glow_c.green(), glow_c.blue(), int(self.fade_alpha * 0.45))
             pen_glow = QPen(glow_color)
@@ -447,7 +447,9 @@ class SpotifySkipperApp(QWidget):
             "theme": "spotify",
             "custom_main": "#ffffff",
             "custom_glow": "#1DB954",
-            "trigger_key": "ctrl_l"
+            "trigger_key": "ctrl_l",
+            "strict_position": False,
+            "show_trail": True
         }
         self.load_settings()
         
@@ -561,6 +563,17 @@ class SpotifySkipperApp(QWidget):
         layout.addLayout(theme_layout)
         
         layout.addWidget(QLabel("<b>Diğer Ayarlar:</b>"))
+        
+        self.strict_pos_checkbox = QCheckBox("Konuma Duyarlı (Sadece Öğretilen Yerde Çalışır)")
+        self.strict_pos_checkbox.setChecked(self.settings.get("strict_position", False))
+        self.strict_pos_checkbox.toggled.connect(lambda c: self.update_setting("strict_position", c))
+        layout.addWidget(self.strict_pos_checkbox)
+        
+        self.show_trail_checkbox = QCheckBox("Ekranda Çizim Çizgisini (Neon) Göster")
+        self.show_trail_checkbox.setChecked(self.settings.get("show_trail", True))
+        self.show_trail_checkbox.toggled.connect(lambda c: self.update_setting("show_trail", c))
+        layout.addWidget(self.show_trail_checkbox)
+        
         self.startup_checkbox = QCheckBox("Windows ile birlikte başlat")
         self.startup_checkbox.setChecked(self.settings.get("run_on_startup", False))
         self.startup_checkbox.toggled.connect(self.on_startup_toggled)
@@ -658,6 +671,10 @@ class SpotifySkipperApp(QWidget):
         self.save_settings(silent=True)
         self.set_startup_registry(checked)
 
+    def update_setting(self, key, value):
+        self.settings[key] = value
+        self.save_settings(silent=True)
+
     def set_startup_registry(self, enabled):
         key = winreg.HKEY_CURRENT_USER
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -724,6 +741,26 @@ class SpotifySkipperApp(QWidget):
         best_template, score = recognizer.recognize(self.draw_history, templates, threshold=5000.0)
         
         if best_template:
+            # KONUM KONTROLÜ
+            if self.settings.get("strict_position", False):
+                cx_d = sum(p[0] for p in self.draw_history) / len(self.draw_history)
+                cy_d = sum(p[1] for p in self.draw_history) / len(self.draw_history)
+                t_raw = best_template.get("raw_points", [])
+                if t_raw:
+                    cx_t = sum(p[0] for p in t_raw) / len(t_raw)
+                    cy_t = sum(p[1] for p in t_raw) / len(t_raw)
+                    sw = user32.GetSystemMetrics(0) or 1920
+                    sh = user32.GetSystemMetrics(1) or 1080
+                    tw = 480
+                    th = int(tw * (sh / sw))
+                    cx_screen = (cx_t / tw) * sw
+                    cy_screen = (cy_t / th) * sh
+                    
+                    # Tolerans ~350 piksel
+                    if math.hypot(cx_d - cx_screen, cy_d - cy_screen) > 350:
+                        self.signals.finish_gesture.emit("Şekil Doğru Ama Konum Yanlış 📍")
+                        return
+
             action = best_template["action"]
             name = best_template["name"]
             
